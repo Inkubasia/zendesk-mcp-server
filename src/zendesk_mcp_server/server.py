@@ -12,7 +12,7 @@ from typing import Any, Dict
 from cachetools.func import ttl_cache
 from dotenv import load_dotenv
 from mcp import types
-from mcp.server import InitializationOptions, NotificationOptions, Server
+from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from pydantic import AnyUrl
 
@@ -33,7 +33,9 @@ zendesk_client = ZendeskClient(
     token=os.getenv("ZENDESK_API_KEY")
 )
 
-server = Server("Zendesk Server")
+# Identity advertised to clients over every transport (stdio and HTTP alike);
+# both paths derive it from here via server.create_initialization_options().
+server = Server("Zendesk", version="0.1.0")
 
 TICKET_ANALYSIS_TEMPLATE = """
 You are a helpful Zendesk support analyst. You've been asked to analyze ticket #{ticket_id}.
@@ -1074,20 +1076,23 @@ def build_app():
     return Starlette(routes=[Mount("/mcp", app=handle_mcp)], lifespan=lifespan)
 
 
+def main_http():
+    """Serve the MCP server over HTTP on 0.0.0.0:$PORT (default 8080)."""
+    import uvicorn
+
+    port = int(os.getenv("PORT", "8080"))
+    logger.info(f"serving Zendesk MCP over HTTP on 0.0.0.0:{port}/mcp")
+    uvicorn.run(build_app(), host="0.0.0.0", port=port)
+
+
 async def main():
-    # Run the server using stdin/stdout streams
+    # Run the server using stdin/stdout streams. Both stdio and HTTP advertise
+    # the same identity via create_initialization_options() (see `server` above).
     async with stdio_server() as (read_stream, write_stream):
         await server.run(
             read_stream=read_stream,
             write_stream=write_stream,
-            initialization_options=InitializationOptions(
-                server_name="Zendesk",
-                server_version="0.1.0",
-                capabilities=server.get_capabilities(
-                    notification_options=NotificationOptions(),
-                    experimental_capabilities={},
-                ),
-            ),
+            initialization_options=server.create_initialization_options(),
         )
 
 
