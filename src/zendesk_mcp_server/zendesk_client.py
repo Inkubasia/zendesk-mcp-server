@@ -322,7 +322,25 @@ class ZendeskClient:
         Zendesk attachment URLs redirect to zdusercontent.com (Zendesk's CDN).
         requests strips the Authorization header on cross-origin redirects,
         which is required — the CDN returns 403 if it receives an auth header.
+
+        Host allowlist: content_url originates from ticket/comment data, which is
+        attacker-influenced (a malicious ticket could plant a bogus content_url).
+        Without this guard, a prompt-injection could coax the model into calling
+        this with an off-Zendesk URL and leak our Zendesk credential (the auth
+        header) to an attacker. Restrict to Zendesk-owned hosts before attaching
+        auth.
         """
+        host = (urllib.parse.urlparse(content_url).hostname or "").lower()
+        allowed_host = (
+            host == "zendesk.com" or host.endswith(".zendesk.com")
+            or host == "zdusercontent.com" or host.endswith(".zdusercontent.com")
+        )
+        if not allowed_host:
+            raise ValueError(
+                f"Refusing to fetch attachment from non-Zendesk host '{host}'. "
+                "content_url must be on *.zendesk.com or *.zdusercontent.com."
+            )
+
         try:
             response = _requests.get(
                 content_url,
