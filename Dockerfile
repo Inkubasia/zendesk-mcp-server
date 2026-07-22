@@ -27,5 +27,10 @@ RUN pip install --no-cache-dir --no-deps .
 # Drop privileges for the runtime container
 USER appuser
 
-# Default command – expects Zendesk credentials via environment variables or an --env-file
+# The HTTP transport is opt-in: override the command with `zendesk-http` to
+# serve MCP over $PORT (default 8080) at /mcp, and publish the port.
+EXPOSE 8080
+
+# Default command – stdio transport. Expects Zendesk credentials via
+# environment variables or an --env-file.
 CMD ["zendesk"]

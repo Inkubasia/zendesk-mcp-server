@@ -46,19 +46,31 @@ You can containerize the server if you prefer an isolated runtime:
    docker build -t zendesk-mcp-server .
    ```
 
-3. Run the server, providing the environment file:
+3. Run the server, providing the environment file.
+
+   By default the image serves the **stdio** transport (`CMD zendesk`) — the mode
+   Claude Desktop/Code speak over STDIN/STDOUT; add `-i` when wiring it to a client:
 
    ```bash
-   docker run --rm --env-file /path/to/.env zendesk-mcp-server
+   docker run --rm -i --env-file /path/to/.env zendesk-mcp-server
    ```
 
-   Add `-i` when wiring the container to MCP clients over STDIN/STDOUT (Claude Code uses this mode). For daemonized runs, add `-d --name zendesk-mcp`.
+   To serve MCP over **streamable HTTP** instead, override the command with the
+   `zendesk-http` entrypoint (serves on `$PORT`, default `8080`, at `/mcp`) and
+   publish the port:
+
+   ```bash
+   docker run --rm -p 8080:8080 --env-file /path/to/.env zendesk-mcp-server zendesk-http
+   # -> http://localhost:8080/mcp
+   ```
+
+   For daemonized runs, add `-d --name zendesk-mcp`.
 
 The image installs dependencies from `requirements.lock`, drops privileges to a non-root user, and expects configuration exclusively via environment variables.
 
 #### Claude MCP Integration
 
-To use the Dockerized server from Claude Code/Desktop, add an entry to Claude Code's `settings.json` similar to:
+To use the Dockerized server from Claude Code/Desktop over stdio, add an entry to Claude Code's `settings.json` similar to:
 
 ```json
 {
