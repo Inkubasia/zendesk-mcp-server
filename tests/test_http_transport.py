@@ -39,7 +39,9 @@ async def _initialize_and_list_tools(port: int) -> list[str]:
 async def _drive() -> list[str]:
     from zendesk_mcp_server.server import build_app
 
-    app = build_app()
+    # Auth is fail-closed by default; pass None explicitly to exercise the
+    # unauthenticated transport.
+    app = build_app(auth_config=None)
     port = _free_port()
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
     server = uvicorn.Server(config)

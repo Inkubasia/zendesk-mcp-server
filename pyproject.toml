@@ -10,6 +10,8 @@ dependencies = [
     "zenpy>=2.0.56",
     "starlette>=0.42.0",
     "uvicorn>=0.34.0",
+    "pyjwt[crypto]>=2.13",
+    "cryptography>=44",
 ]
 
 [build-system]
