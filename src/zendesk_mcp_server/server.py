@@ -1048,6 +1048,32 @@ async def handle_read_resource(uri: AnyUrl) -> str:
         raise
 
 
+def build_app():
+    """Build the ASGI app that serves this MCP server over streamable HTTP.
+
+    The same `server` instance (handlers, tool registration, ZendeskClient) is
+    wrapped in the SDK's streamable-HTTP session manager and mounted at /mcp.
+    No tool logic changes — only the transport.
+    """
+    import contextlib
+
+    from starlette.applications import Starlette
+    from starlette.routing import Mount
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+
+    session_manager = StreamableHTTPSessionManager(app=server, json_response=False)
+
+    async def handle_mcp(scope, receive, send):
+        await session_manager.handle_request(scope, receive, send)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app):
+        async with session_manager.run():
+            yield
+
+    return Starlette(routes=[Mount("/mcp", app=handle_mcp)], lifespan=lifespan)
+
+
 async def main():
     # Run the server using stdin/stdout streams
     async with stdio_server() as (read_stream, write_stream):
