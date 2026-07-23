@@ -92,6 +92,14 @@ To use the Dockerized server from Claude Code/Desktop over stdio, add an entry t
 
 Adjust the paths to match your environment. After saving the file, restart Claude for the new MCP server to be detected.
 
+## Remote auth (OAuth 2.1)
+
+The HTTP transport can gate `/mcp` behind any standards-compliant OAuth 2.1 / OIDC authorization server (e.g. Auth0, Okta, Keycloak). The MCP server acts purely as an OAuth 2.1 **Resource Server**: your AS stays the Authorization Server (login, dynamic client registration, PKCE, token issuance), and the server verifies tokens **offline** — it validates each bearer token's signature against the AS's published JWKS and checks `iss`/`exp` (and `aud` when configured). No AS API key or secret lives on the server.
+
+- **Enabling it:** set `MCP_AUTH_ISSUER` to your AS's issuer URL (see `.env.example`). Auth is then **on** — every request to `/mcp` needs a valid `Authorization: Bearer <token>`; requests without one get **401** with a `WWW-Authenticate` header pointing at the resource metadata. To run the HTTP transport **without** auth (dev/local only) set `MCP_AUTH_DISABLED=1`; if neither the issuer nor this flag is set, the server **fails closed and refuses to start** rather than silently serving unauthenticated.
+- **Discovery:** the server discovers the JWKS from the AS metadata at `<issuer>/.well-known/oauth-authorization-server`, and serves its own OAuth Protected Resource Metadata at the resource-suffixed path **`/.well-known/oauth-protected-resource/mcp`** (200 JSON with `resource` and `authorization_servers`). Note the `/mcp` suffix — the bare path returns 404; real clients follow the URL in the `WWW-Authenticate` header, so this only matters if you probe by hand.
+- **Config:** `MCP_RESOURCE_URL` is the RFC 8707 resource identifier (this endpoint's public URL). `MCP_EXPECTED_AUDIENCE` pins the exact `aud` claim to require — required when auth is on, unless you set `MCP_ALLOW_ANY_AUDIENCE=1`, so tokens minted for another resource on a shared issuer are rejected. `MCP_REQUIRED_SCOPES` is a space-separated scope list (blank = any valid token from the issuer is accepted).
+
 ## Resources
 
 - zendesk://knowledge-base, get access to the whole help center articles.

@@ -1050,18 +1050,35 @@ async def handle_read_resource(uri: AnyUrl) -> str:
         raise
 
 
-def build_app():
+# Sentinel: distinguishes "caller didn't pass auth_config" (=> read env via
+# load_auth_config()) from "caller explicitly passed None" (=> force the
+# unauthenticated path, regardless of env).
+_AUTH_UNSET = object()
+
+
+def build_app(auth_config=_AUTH_UNSET):
     """Build the ASGI app that serves this MCP server over streamable HTTP.
 
     The same `server` instance (handlers, tool registration, ZendeskClient) is
     wrapped in the SDK's streamable-HTTP session manager and mounted at /mcp.
     No tool logic changes — only the transport.
+
+    When `auth_config` resolves to an AuthConfig (the default reads env via
+    `load_auth_config()`), `/mcp` is gated behind OAuth 2.1 bearer auth and the
+    OAuth Protected Resource Metadata is served. When it resolves to None (auth
+    disabled/unconfigured, or explicitly passed None), behaviour is exactly the
+    unauthenticated app.
     """
     import contextlib
 
     from starlette.applications import Starlette
-    from starlette.routing import Mount
+    from starlette.routing import Mount, Route
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+
+    from zendesk_mcp_server.auth import build_verifier, load_auth_config
+
+    if auth_config is _AUTH_UNSET:
+        auth_config = load_auth_config()
 
     session_manager = StreamableHTTPSessionManager(app=server, json_response=False)
 
@@ -1073,7 +1090,60 @@ def build_app():
         async with session_manager.run():
             yield
 
-    return Starlette(routes=[Mount("/mcp", app=handle_mcp)], lifespan=lifespan)
+    # No auth configured — mount the session handler unauthenticated.
+    if auth_config is None:
+        return Starlette(routes=[Mount("/mcp", app=handle_mcp)], lifespan=lifespan)
+
+    # Auth path: gate /mcp behind OAuth 2.1 bearer auth. Mirrors the SDK's
+    # FastMCP.streamable_http_app wiring (verified against mcp==1.28.1).
+    from starlette.middleware import Middleware
+    from starlette.middleware.authentication import AuthenticationMiddleware
+    from mcp.server.auth.middleware.auth_context import AuthContextMiddleware
+    from mcp.server.auth.middleware.bearer_auth import (
+        BearerAuthBackend,
+        RequireAuthMiddleware,
+    )
+    from mcp.server.auth.routes import (
+        build_resource_metadata_url,
+        create_protected_resource_routes,
+    )
+
+    verifier = build_verifier(auth_config)
+
+    # App-level: extract a bearer token if present and stash the auth context.
+    middleware = [
+        Middleware(AuthenticationMiddleware, backend=BearerAuthBackend(verifier)),
+        Middleware(AuthContextMiddleware),
+    ]
+
+    # /mcp ENFORCES auth: 401 + WWW-Authenticate carrying the resource metadata
+    # url. Kept as a RequireAuthMiddleware *instance* so Starlette treats it as a
+    # pure ASGI app (all verbs) — a bare function endpoint would default to GET
+    # only and break streamable POST/DELETE.
+    resource_metadata_url = build_resource_metadata_url(auth_config.resource_url)
+    mcp_route = Route(
+        "/mcp",
+        endpoint=RequireAuthMiddleware(
+            handle_mcp,
+            auth_config.required_scopes,  # [] never None — it is iterated
+            resource_metadata_url,
+        ),
+    )
+
+    # Discovery endpoint clients hit first (resource-suffixed well-known path).
+    # `or None` here is deliberate and the OPPOSITE of the [] above.
+    pr_routes = create_protected_resource_routes(
+        resource_url=auth_config.resource_url,
+        authorization_servers=[auth_config.issuer],
+        scopes_supported=auth_config.required_scopes or None,
+        resource_name=auth_config.resource_name,
+    )
+
+    return Starlette(
+        routes=[*pr_routes, mcp_route],
+        middleware=middleware,
+        lifespan=lifespan,
+    )
 
 
 def main_http():
