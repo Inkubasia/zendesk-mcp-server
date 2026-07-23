@@ -16,5 +16,10 @@ dependencies = [
 requires = [ "hatchling",]
 build-backend = "hatchling.build"
 
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
 [project.scripts]
 zendesk = "zendesk_mcp_server:main"
