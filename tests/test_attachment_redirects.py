@@ -38,7 +38,9 @@ class FakeResp:
 
 
 def _make_client():
-    return zc.ZendeskClient(subdomain="dummy", email="d@example.com", token="tok")
+    # subdomain "acme" => this tenant's own host is acme.zendesk.com (the only
+    # host the Zendesk credential may be sent to).
+    return zc.ZendeskClient(subdomain="acme", email="d@example.com", token="tok")
 
 
 def _install(monkeypatch, responses):
@@ -112,3 +114,34 @@ def test_open_redirect_via_relative_location_stays_on_host(monkeypatch):
     assert out["content_type"] == "image/png"
     assert calls[1]["url"] == "https://acme.zendesk.com/redirected/blob"
     assert "Authorization" in calls[1]["headers"]  # same host -> auth retained
+
+
+def test_backslash_parser_differential_blocked(monkeypatch):
+    # urllib.parse reads host 'acme.zendesk.com' here, but urllib3/requests
+    # CONNECT to evil.com. Validating with the connect-parser must reject it,
+    # and no request (with our credential) may be issued.
+    calls = _install(monkeypatch, [_png_ok()])  # must never be reached
+    with pytest.raises(ValueError, match="non-Zendesk host"):
+        _make_client().get_ticket_attachment("https://evil.com\\@acme.zendesk.com/x")
+    assert calls == []
+
+
+def test_foreign_zendesk_tenant_gets_no_credential(monkeypatch):
+    # A different Zendesk tenant is still off-limits for the credential: the
+    # auth header must only ever reach THIS account's own subdomain.
+    calls = _install(monkeypatch, [_png_ok()])  # must never be reached
+    with pytest.raises(ValueError, match="foreign host"):
+        _make_client().get_ticket_attachment("https://other.zendesk.com/attachments/1")
+    assert calls == []
+
+
+def test_scheme_downgrade_redirect_blocked(monkeypatch):
+    # A same-host https->http downgrade must not carry the Basic credential over
+    # cleartext; the http hop is refused before any request.
+    calls = _install(monkeypatch, [
+        FakeResp(302, {"Location": "http://acme.zendesk.com/x"}),
+        _png_ok(),  # must never be reached
+    ])
+    with pytest.raises(ValueError, match="non-https"):
+        _make_client().get_ticket_attachment("https://acme.zendesk.com/attachments/1")
+    assert len(calls) == 1  # only the initial https hop was issued

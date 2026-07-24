@@ -5,6 +5,7 @@ import urllib.request
 import urllib.parse
 import base64
 import requests as _requests
+from urllib3.util import parse_url as _parse_url
 
 from zenpy import Zenpy
 from zenpy.lib.api_objects import Comment
@@ -310,30 +311,68 @@ class ZendeskClient:
     _ATTACHMENT_REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
 
     @staticmethod
-    def _attachment_host_allowed(url: str) -> bool:
-        """True iff url's host is a Zendesk-owned host we'll attach auth to / follow."""
-        host = (urllib.parse.urlparse(url).hostname or "").lower()
+    def _attachment_url_parts(url: str) -> tuple[str, str]:
+        """Return (scheme, host), lowercased, parsed the SAME way requests/urllib3
+        will CONNECT — deliberately NOT urllib.parse.
+
+        The two parsers disagree on hosts urllib.parse mis-attributes: e.g.
+        ``https://evil.com\\@ok.zendesk.com/`` has hostname ``ok.zendesk.com`` under
+        urllib.parse but urllib3/requests connects to ``evil.com``. Validating the
+        host with a different parser than the one that opens the socket is an
+        allowlist bypass, so we parse with urllib3 here. Returns ("", "") if the
+        URL is unparseable (→ rejected)."""
+        try:
+            parsed = _parse_url(url)
+        except Exception:
+            return "", ""
+        return (parsed.scheme or "").lower(), (parsed.host or "").lower()
+
+    @staticmethod
+    def _is_zendesk_owned(host: str) -> bool:
         return (
             host == "zendesk.com" or host.endswith(".zendesk.com")
             or host == "zdusercontent.com" or host.endswith(".zdusercontent.com")
         )
 
+    def _attachment_host_allowed(self, url: str, *, with_auth: bool) -> bool:
+        """Whether we may fetch ``url``. Always requires https + a Zendesk-owned
+        host. When ``with_auth`` (the Zendesk credential will be attached) the host
+        must be THIS tenant's own subdomain — the only place this account's
+        content_urls live and the only host the credential should ever reach.
+        Credential-free hops (after a cross-host redirect) may also touch the CDN
+        or other Zendesk hosts, keeping SSRF contained to Zendesk infrastructure."""
+        scheme, host = self._attachment_url_parts(url)
+        if scheme != "https" or not host:
+            return False
+        if with_auth:
+            return host == f"{self.subdomain}.zendesk.com".lower()
+        return self._is_zendesk_owned(host)
+
     def _fetch_attachment_response(self, url: str, max_hops: int = 5):
         """GET an attachment, following redirects MANUALLY.
 
-        Each hop's host is re-validated against the allowlist before the request
-        is sent (closes the SSRF where a *.zendesk.com open-redirect could point
-        us at an internal/attacker host), and the Zendesk auth header is dropped
-        on any cross-host hop (the credential is never sent off the original host
-        — and the CDN 403s if it receives it). Returns the final streamed response.
+        Every hop is re-validated BEFORE the request, using the same parser that
+        opens the socket (closing parser-differential allowlist bypasses); the
+        host must be https and Zendesk-owned; and the Zendesk credential is sent
+        ONLY to this tenant's own subdomain — dropped on the first cross-host hop
+        and never reattached. Returns the final streamed response.
         """
         current = url
         send_auth = True
         for _ in range(max_hops + 1):
-            if not self._attachment_host_allowed(current):
-                host = (urllib.parse.urlparse(current).hostname or "").lower()
+            if not self._attachment_host_allowed(current, with_auth=send_auth):
+                scheme, host = self._attachment_url_parts(current)
+                if scheme != "https":
+                    raise ValueError(
+                        f"Refusing to fetch attachment over non-https URL (host '{host}')."
+                    )
+                if send_auth and self._is_zendesk_owned(host):
+                    raise ValueError(
+                        f"Refusing to send Zendesk credentials to foreign host '{host}' "
+                        f"(expected {self.subdomain}.zendesk.com)."
+                    )
                 raise ValueError(
-                    f"Refusing to follow attachment redirect to non-Zendesk host '{host}'."
+                    f"Refusing to fetch attachment from non-Zendesk host '{host}'."
                 )
             headers = {'Authorization': self.auth_header} if send_auth else {}
             response = _requests.get(
@@ -345,8 +384,8 @@ class ZendeskClient:
                 if not location:
                     raise ValueError("Attachment redirect response had no Location header.")
                 nxt = urllib.parse.urljoin(current, location)
-                cur_host = (urllib.parse.urlparse(current).hostname or "").lower()
-                nxt_host = (urllib.parse.urlparse(nxt).hostname or "").lower()
+                _, cur_host = self._attachment_url_parts(current)
+                _, nxt_host = self._attachment_url_parts(nxt)
                 if nxt_host != cur_host:
                     send_auth = False  # never send our Zendesk credential to a different host
                 current = nxt
@@ -366,26 +405,15 @@ class ZendeskClient:
           so the binary allowlist is not a blank cheque for arbitrary content.
         - 25 MB size cap to prevent image bombs and excessive token usage.
 
-        Zendesk attachment URLs redirect to zdusercontent.com (Zendesk's CDN).
-        Redirects are followed MANUALLY (see _fetch_attachment_response): every
-        hop's host is re-validated against the allowlist and the auth header is
-        dropped on cross-host hops — we do NOT rely on requests' implicit
-        header-stripping, and no hop can leave the Zendesk-owned host set.
-
-        Host allowlist: content_url originates from ticket/comment data, which is
-        attacker-influenced (a malicious ticket could plant a bogus content_url).
-        Without this guard, a prompt-injection could coax the model into calling
-        this with an off-Zendesk URL and leak our Zendesk credential (the auth
-        header) to an attacker. Restrict to Zendesk-owned hosts before attaching
-        auth.
+        content_url originates from ticket/comment data, which is attacker-
+        influenced (a malicious ticket could plant a bogus content_url), so a
+        prompt-injection could try to coax the model into leaking our Zendesk
+        credential. The fetch (see _fetch_attachment_response) defends against
+        that: it is https-only, validates every hop's host with the SAME parser
+        that opens the socket, sends the credential ONLY to this tenant's own
+        subdomain, and refuses any non-Zendesk host — no redirect can launder the
+        request off Zendesk infrastructure or onto an attacker's host.
         """
-        if not self._attachment_host_allowed(content_url):
-            host = (urllib.parse.urlparse(content_url).hostname or "").lower()
-            raise ValueError(
-                f"Refusing to fetch attachment from non-Zendesk host '{host}'. "
-                "content_url must be on *.zendesk.com or *.zdusercontent.com."
-            )
-
         try:
             response = self._fetch_attachment_response(content_url)
             response.raise_for_status()
