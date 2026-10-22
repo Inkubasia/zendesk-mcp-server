@@ -1101,3 +1101,73 @@ class ZendeskClient:
             }
         except Exception as e:
             raise Exception(f"Failed to update ticket {ticket_id}: {str(e)}")
+
+    def list_jira_links(self, ticket_id: int) -> Dict[str, Any]:
+        """List the Jira issues linked to a ticket.
+
+        Reads the links of the original Zendesk Support for Jira integration —
+        the ones the Zendesk Jira app writes when an agent escalates or links a
+        ticket — via GET /api/v2/jira/links. The "v2" there is the REST API
+        version: this is NOT "Jira Integration V2", whose links live under
+        /api/v2/integrations/jira/{external_id}/links. GET /api/services/jira/links
+        lists the same links but is deprecated, and
+        GET /api/v2/tickets/{id}/related does not reflect them at all.
+
+        The endpoint answers a nonexistent ticket with an empty list, exactly as
+        for a ticket that has no links, so the ticket is looked up first: a
+        nonexistent id must not read as "not linked".
+        """
+        try:
+            self.get_ticket(ticket_id)
+        except Exception as e:
+            # get_ticket wraps every failure (not found, auth, network) the same
+            # way, so say only what is known: the ticket could not be confirmed.
+            raise Exception(f"Could not confirm Zendesk ticket {ticket_id} exists: {e}")
+
+        links: List[Dict[str, Any]] = []
+        after = None
+        try:
+            while True:
+                params = {'filter[ticket_id]': ticket_id}
+                if after is not None:
+                    # The cursor is the last link id seen. The next request is
+                    # built here rather than by following the response's
+                    # after_cursor, which is a full URL taken from the response.
+                    params['page[after]'] = after
+                url = f"{self.base_url}/jira/links?{urllib.parse.urlencode(params)}"
+
+                req = urllib.request.Request(url)
+                req.add_header('Authorization', self.auth_header)
+                req.add_header('Content-Type', 'application/json')
+
+                with urllib.request.urlopen(req) as response:
+                    data = json.loads(response.read().decode())
+
+                page = data.get('links') or []
+                links.extend(
+                    {
+                        'link_id': link.get('id'),
+                        'ticket_id': link.get('ticket_id'),
+                        'issue_id': link.get('issue_id'),
+                        'issue_key': link.get('issue_key'),
+                        'created_at': link.get('created_at'),
+                        'updated_at': link.get('updated_at'),
+                    }
+                    for link in page
+                )
+                if not page or not (data.get('meta') or {}).get('has_more'):
+                    break
+                if page[-1].get('id') == after:
+                    break  # cursor did not advance; stop rather than loop
+                after = page[-1].get('id')
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode() if e.fp else "No response body"
+            raise Exception(f"Failed to list Jira links for ticket {ticket_id}: HTTP {e.code} - {e.reason}. {error_body}")
+        except Exception as e:
+            raise Exception(f"Failed to list Jira links for ticket {ticket_id}: {str(e)}")
+
+        return {
+            'ticket_id': ticket_id,
+            'total': len(links),
+            'links': links,
+        }
