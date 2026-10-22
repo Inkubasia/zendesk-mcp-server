@@ -285,3 +285,32 @@ Update fields on an existing Zendesk ticket (e.g., status, priority, assignee)
   - `tags` (array[string], optional)
   - `custom_fields` (array[object], optional)
   - `due_at` (string, optional): ISO8601 datetime
+
+### get_jira_links
+
+List the Jira issues linked to a ticket, so a link can be verified rather than
+assumed.
+
+Links are read from the original **Zendesk Support for Jira** integration: the
+links the Zendesk Jira app writes when an agent escalates or links a ticket. This
+is *not* a
+[Jira remote issue link](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-remote-links/),
+which is a separate store this server never reads or writes. No Jira credentials are
+needed.
+
+- Input:
+  - `ticket_id` (integer): The Zendesk ticket whose links to read
+- Output: `{ticket_id, total, links}`, where each link has `link_id`, `ticket_id`,
+  `issue_id`, `issue_key`, `created_at` and `updated_at`. A ticket that does not
+  exist, or that the configured user cannot see, is an error rather than an empty
+  list, so a nonexistent id never reads as "not linked". A typo that lands on a
+  different real ticket cannot be detected.
+
+Notes:
+
+- Zendesk documents this endpoint (`GET /api/v2/jira/links`) as **admin only**,
+  so `ZENDESK_EMAIL` must be an admin for this tool.
+- The `v2` in that path is the REST API version. It is unrelated to Zendesk's
+  "Jira Integration V2", whose links live under
+  `/api/v2/integrations/jira/{external_id}/links`. The older
+  `GET /api/services/jira/links` lists the same links but is deprecated.

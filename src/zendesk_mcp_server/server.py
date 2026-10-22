@@ -587,6 +587,28 @@ async def handle_list_tools() -> list[types.Tool]:
                 },
                 "required": ["ticket_id"]
             }
+        ),
+        types.Tool(
+            name="get_jira_links",
+            description=(
+                "List the Jira issues currently linked to a Zendesk ticket, so a "
+                "link can be verified rather than assumed. Returns issue keys, "
+                "Jira issue ids and link ids. Reads links made by the Zendesk "
+                "Support for Jira integration (the Zendesk Jira app); links made "
+                "through Zendesk's separate 'Jira Integration V2' are not included. "
+                "Returns an error, not an empty list, if the ticket cannot be found. "
+                "Requires the server's Zendesk user to be an admin."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticket_id": {
+                        "type": "integer",
+                        "description": "The Zendesk ticket whose links to read."
+                    }
+                },
+                "required": ["ticket_id"]
+            }
         )
     ]
 
@@ -1001,6 +1023,12 @@ def _dispatch_tool(
             type="text",
             text=json.dumps({"message": "Ticket updated successfully", "ticket": updated}, indent=2)
         )]
+
+    elif name == "get_jira_links":
+        if not arguments or "ticket_id" not in arguments:
+            raise ValueError("Missing required argument: ticket_id")
+        result = zendesk_client.list_jira_links(int(arguments["ticket_id"]))
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
     else:
         raise ValueError(f"Unknown tool: {name}")
